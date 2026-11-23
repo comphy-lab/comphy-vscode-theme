@@ -1,25 +1,28 @@
 name: Publish Extension
 
 on:
-  # Publishing is driven by the GitHub release; a bare tag push no longer
-  # triggers, so a tag-then-release flow cannot race itself into a
-  # version-exists failure on the marketplaces.
   workflow_dispatch:
     inputs:
+      tag:
+        description: 'Release tag at the selected main commit (vMAJOR.MINOR.PATCH)'
+        required: true
+        type: string
       dry_run:
-        description: 'Test run without publishing'
+        description: 'Validate packaging only; do not publish'
         type: boolean
-        default: false
-  release:
-    types: [published]
+        default: true
 
 # One publish at a time; a re-fired event queues instead of racing.
 concurrency:
   group: publish-extension
   cancel-in-progress: false
 
+permissions:
+  contents: read
+
 jobs:
   check-version:
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.get_version.outputs.version }}
@@ -28,17 +31,49 @@ jobs:
       ovsx_exists: ${{ steps.check_versions.outputs.ovsx_exists }}
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          fetch-depth: 0  # Fetch all history for all tags and branches
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: '20'
+          node-version: '22'
+
+      - name: Verify tagged release
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+          RELEASE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Use an exact vMAJOR.MINOR.PATCH tag."
+            exit 1
+          fi
+          tagged_sha=$(git rev-parse --verify "refs/tags/${RELEASE_TAG}^{commit}")
+          if [[ "$tagged_sha" != "$RELEASE_SHA" || "$(git rev-parse HEAD)" != "$RELEASE_SHA" ]]; then
+            echo "::error::The tag must point to the exact default-branch commit selected for this run."
+            exit 1
+          fi
+          version=$(node -p 'require("./package.json").version')
+          if ! node -e 'const p=require("./package.json"); if (["main","browser","activationEvents"].some(k=>Object.hasOwn(p,k))) process.exitCode=1'; then
+            echo "::error::This theme package must not define an editor extension entry point."
+            exit 1
+          fi
+          if [[ "$RELEASE_TAG" != "v$version" ]]; then
+            echo "::error::The release tag must match the version in package.json."
+            exit 1
+          fi
 
       - name: Install vsce and ovsx
-        run: npm install -g @vscode/vsce ovsx
+        run: npm install -g @vscode/vsce@4.1.1 ovsx@1.4.0
+
+      - name: Validate package without publishing
+        if: inputs.dry_run
+        run: vsce package --out "$RUNNER_TEMP/comphy-theme.vsix"
 
       - name: Get version from package.json
         id: get_version
@@ -51,7 +86,7 @@ jobs:
         id: check_versions
         env:
           VERSION: ${{ steps.get_version.outputs.version }}
-          DRY_RUN: ${{ github.event.inputs.dry_run == 'true' }}
+          DRY_RUN: ${{ inputs.dry_run }}
         run: |
           VS_EXISTS="false"
           OVSX_EXISTS="false"
@@ -65,7 +100,7 @@ jobs:
           fi
 
           echo "Checking version $VERSION on VS Marketplace..."
-          if npx @vscode/vsce show vatsalsy.comphy-theme $VERSION --json 2>/dev/null | grep -q "\"version\": \"$VERSION\""; then
+          if vsce show vatsalsy.comphy-theme $VERSION --json 2>/dev/null | grep -q "\"version\": \"$VERSION\""; then
             VS_EXISTS="true"
             echo "::notice::Version $VERSION already exists on VS Marketplace"
           else
@@ -73,7 +108,7 @@ jobs:
           fi
 
           echo "Checking version $VERSION on Open VSX Registry..."
-          if npx ovsx get vatsalsy.comphy-theme $VERSION --json 2>/dev/null | grep -q "\"version\": \"$VERSION\""; then
+          if ovsx get vatsalsy.comphy-theme $VERSION --json 2>/dev/null | grep -q "\"version\": \"$VERSION\""; then
             OVSX_EXISTS="true"
             echo "::notice::Version $VERSION already exists on Open VSX Registry"
           else
@@ -93,70 +128,62 @@ jobs:
 
   publish:
     needs: check-version
-    if: needs.check-version.outputs.should_publish == 'true'
+    if: github.ref == 'refs/heads/main' && !inputs.dry_run && needs.check-version.outputs.should_publish == 'true'
     runs-on: ubuntu-latest
+    environment: editor-marketplace-production
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: '20'
+          node-version: '22'
 
       - name: Install dependencies
-        run: npm install -g @vscode/vsce ovsx
+        run: npm install -g @vscode/vsce@4.1.1 ovsx@1.4.0
 
       - name: Package extension
         run: |
           echo "Packaging extension..."
-          npx @vscode/vsce package || {
+          vsce package --out "$RUNNER_TEMP/comphy-theme.vsix" || {
             echo "::error::Failed to package extension"
             exit 1
           }
           echo "::notice::Successfully packaged extension"
 
-      - name: Test mode notice
-        if: github.event.inputs.dry_run == 'true'
-        run: |
-          echo "::notice::Running in test mode - skipping actual publishing"
-          echo "### Test Mode Results" >> $GITHUB_STEP_SUMMARY
-          echo "✅ Extension packaging successful" >> $GITHUB_STEP_SUMMARY
-          echo "✅ Version format valid" >> $GITHUB_STEP_SUMMARY
-          echo "✅ Would publish to VS Marketplace" >> $GITHUB_STEP_SUMMARY
-          echo "✅ Would publish to Open VSX Registry" >> $GITHUB_STEP_SUMMARY
-
       - name: Publish to VS Marketplace
-        if: needs.check-version.outputs.vs_exists != 'true' && github.event.inputs.dry_run != 'true'
+        if: needs.check-version.outputs.vs_exists != 'true'
         env:
-          VSCE_TOKEN: ${{ secrets.VS_MARKETPLACE_TOKEN }}
+          VSCE_PAT: ${{ secrets.VSCE_RELEASE_TOKEN }}
           VERSION: ${{ needs.check-version.outputs.version }}
         run: |
           echo "Publishing version $VERSION to VS Marketplace..."
-          npx @vscode/vsce publish -p $VSCE_TOKEN || {
+          : "${VSCE_PAT:?VS Marketplace release token is not configured}"
+          vsce publish --packagePath "$RUNNER_TEMP/comphy-theme.vsix" || {
             echo "::error::Failed to publish to VS Marketplace"
             exit 1
           }
           echo "::notice::Successfully published to VS Marketplace"
 
       - name: Publish to Open VSX Registry
-        if: needs.check-version.outputs.ovsx_exists != 'true' && github.event.inputs.dry_run != 'true'
+        if: needs.check-version.outputs.ovsx_exists != 'true'
         env:
-          OVSX_TOKEN: ${{ secrets.OPEN_VSX_TOKEN }}
+          OVSX_PAT: ${{ secrets.OVSX_RELEASE_TOKEN }}
           VERSION: ${{ needs.check-version.outputs.version }}
         run: |
-          echo "Creating namespace on Open VSX (if needed)..."
-          npx ovsx create-namespace vatsalsy -p $OVSX_TOKEN || true
-
           echo "Publishing version $VERSION to Open VSX Registry..."
-          npx ovsx publish -p $OVSX_TOKEN || {
+          : "${OVSX_PAT:?Open VSX release token is not configured}"
+          ovsx publish "$RUNNER_TEMP/comphy-theme.vsix" || {
             echo "::error::Failed to publish to Open VSX Registry"
             exit 1
           }
           echo "::notice::Successfully published to Open VSX Registry"
 
       - name: Publish Summary
-        if: github.event.inputs.dry_run != 'true'
         run: |
           echo "### Publishing Summary" >> $GITHUB_STEP_SUMMARY
           echo "Version: ${{ needs.check-version.outputs.version }}" >> $GITHUB_STEP_SUMMARY
