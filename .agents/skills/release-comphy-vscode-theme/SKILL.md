@@ -5,27 +5,13 @@ description: Create versioned releases with proper tagging and automation for th
 
 # Release Workflow
 
-`package.json` version is the single source of truth for the extension. Tags must be `vMAJOR.MINOR.PATCH` and match `package.json`. Publishing is handled by GitHub Actions (`Publish Extension`) on tag push or GitHub Release publish.
+`package.json` version is the single source of truth for the extension. Tags must be `vMAJOR.MINOR.PATCH` and match `package.json`. The [protected workflow](../../../docs/release-security.md) publishes only after an explicit GitHub Actions dispatch from `main`; a tag or GitHub Release alone does not publish.
 
-## Automated Release (Preferred)
+1. Update version and changelog, regenerate themes, and merge the reviewed release commit.
+2. Create the annotated tag `vX.Y.Z` on that commit and push it using the approved tag procedure.
+3. In **Publish Extension**, select `main` and enter the tag. Run with `dry_run=true` to validate packaging; turn it off only for an authorized release. A separate approver reviews the environment deployment.
 
-### Tag Push (Standard)
-
-1. Update version + changelog, regenerate themes, commit.
-2. Create annotated tag `vX.Y.Z` and push tags.
-3. The `Publish Extension` workflow publishes to VS Marketplace and Open VSX.
-
-### GitHub Release (Alternate Trigger)
-
-Publishing also runs when a GitHub Release is published with a `vX.Y.Z` tag that matches `package.json`.
-
-### Dry Run (Validation)
-
-Manually run the workflow with `dry_run=true` to validate packaging without publishing.
-
-Required secrets: `VS_MARKETPLACE_TOKEN`, `OPEN_VSX_TOKEN`.
-
-## Manual Release (Fallback)
+## Release preparation
 
 ### Pre-flight Checks
 
@@ -87,16 +73,9 @@ git tag -a "v$VERSION" -m "Release v$VERSION"
 git push --follow-tags
 ```
 
-### Manual Publish (Only if Actions Unavailable)
+### Publish via GitHub Actions
 
-```bash
-npm install -g @vscode/vsce ovsx
-VSCE_TOKEN=...  # VS_MARKETPLACE_TOKEN
-OVSX_TOKEN=...  # OPEN_VSX_TOKEN
-npx @vscode/vsce publish -p $VSCE_TOKEN
-npx ovsx create-namespace vatsalsy -p $OVSX_TOKEN || true
-npx ovsx publish -p $OVSX_TOKEN
-```
+Use the protected workflow above. Do not fall back to workstation credentials or an ad hoc publish if an approval or configuration gate blocks the job.
 
 ## Post-release Verification
 
@@ -106,7 +85,7 @@ node -p "require('./package.json').version"
 git describe --tags --abbrev=0
 ```
 
-- Confirm the new version is visible for `vatsalsy.comphy-gruvbox` on VS Marketplace and Open VSX.
+- Confirm the new version is visible for `vatsalsy.comphy-theme` on VS Marketplace and Open VSX.
 
 ## Rollback (if needed)
 
